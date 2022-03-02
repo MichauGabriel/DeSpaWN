@@ -7,7 +7,9 @@ Description:
 --------------
 Function to generate the layers used in DeSpaWN TF model.
 Please cite the corresponding paper:
-Michau, G., & Frusque, G., & Fink, O. (2021). Fully Learnable Deep Wavelet Transform for Unsupervised Monitoring of High-Frequency Time Series. arXiv preprint arXiv:2105.00899.
+Michau, G., Frusque, G., & Fink, O. (2022).
+Fully learnable deep wavelet transform for unsupervised monitoring of high-frequency time series.
+Proceedings of the National Academy of Sciences, 119(8).
 
 Version: 1.0
 --------
