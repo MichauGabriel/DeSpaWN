@@ -6,8 +6,10 @@ Description:
 --------------
 Toy script to showcase the deep neural network DeSpaWN.
 Please cite the corresponding paper:
-Michau, G., & Frusque, G., & Fink, O. (2021). Fully Learnable Deep Wavelet Transform for Unsupervised Monitoring of High-Frequency Time Series. arXiv preprint arXiv:2105.00899.
-
+          Michau, G., Frusque, G., & Fink, O. (2022). 
+          Fully learnable deep wavelet transform for unsupervised monitoring of high-frequency time series. 
+          Proceedings of the National Academy of Sciences, 119(8).
+          
 Version: 1.0
 --------
 
@@ -72,7 +74,7 @@ lossFactor = 1.0
 # Train wavelets? (Trainable kernels)
 kernTrainable = True
 # Which training mode?
-# cf (https://arxiv.org/pdf/2105.00899.pdf) [Section 4.4 Ablation Study]
+# cf (https://arxiv.org/pdf/2105.00899.pdf -- https://doi.org/10.1073/pnas.2106598119) [Section 4.4 Ablation Study]
 #   CQF => learn wavelet 0 infer all other kernels from the network
 #   PerLayer => learn one wavelet per level, infer others
 #   PerFilter => learn wavelet + scaling function per level + infer other
