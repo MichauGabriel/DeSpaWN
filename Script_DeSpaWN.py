@@ -107,6 +107,7 @@ kernelInit = np.array([-0.010597401785069032, 0.0328830116668852, 0.030841381835
 
 epochs = 460
 verbose = 2
+checkpointPath = 'despawn_checkpoint.pt'
 
 model = despawn.DeSpaWN(kernelInit=kernelInit, kernTrainable=kernTrainable,
                         level=level, lossCoeff=lossCoeff,
@@ -142,6 +143,36 @@ for epoch in range(epochs):
     coefficientLossHistory.append(epochCoefficientLoss / epochSamples)
     if verbose == 2:
         print(f'{epoch + 1}/{epochs} - loss: {H[-1]:.6f}')
+
+# Save everything needed to reuse the trained model or resume training.
+torch.save({
+    'epoch': epochs,
+    'model_state_dict': model.state_dict(),
+    'optimizer_state_dict': opt.state_dict(),
+    'model_config': {
+        'kernelInit': kernelInit,
+        'kernTrainable': kernTrainable,
+        'level': level,
+        'lossCoeff': lossCoeff,
+        'kernelsConstraint': mode,
+        'initHT': initHT,
+        'trainHT': trainHT,
+    },
+    'lossHistory': H,
+    'reconstructionLossHistory': reconstructionLossHistory,
+    'coefficientLossHistory': coefficientLossHistory,
+}, checkpointPath)
+print(f'Saved checkpoint to {checkpointPath}')
+
+# To load the checkpoint later, instantiate the model with the saved
+# configuration and then restore its model and optimizer state:
+# checkpoint = torch.load(checkpointPath, map_location=device)
+# model = despawn.DeSpaWN(**checkpoint['model_config']).to(device)
+# model.load_state_dict(checkpoint['model_state_dict'])
+# opt = torch.optim.NAdam(model.parameters(), lr=0.001,
+#                         betas=(0.9, 0.999), eps=1e-07)
+# opt.load_state_dict(checkpoint['optimizer_state_dict'])
+# startEpoch = checkpoint['epoch']
 
 # Examples for plotting the model outputs and learnings
 epochsAxis = np.arange(1, epochs + 1)
