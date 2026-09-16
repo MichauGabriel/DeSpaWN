@@ -115,25 +115,44 @@ model = despawn.DeSpaWN(kernelInit=kernelInit, kernTrainable=kernTrainable,
 opt = torch.optim.NAdam(model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-07)
 model.train()
 H = []
+reconstructionLossHistory = []
+coefficientLossHistory = []
 for epoch in range(epochs):
     opt.zero_grad()
     epochLoss = 0.0
+    epochReconstructionLoss = 0.0
+    epochCoefficientLoss = 0.0
     epochSamples = 0
     for (batch,) in trainLoader:
         batch = batch.to(device, non_blocking=True)
         outputs = model(batch)
         reconstruction, coeff = outputs[:2]
-        loss = torch.mean(torch.abs(batch-reconstruction)) + lossFactor*torch.mean(coeff)
+        reconstructionLoss = torch.mean(torch.abs(batch-reconstruction))
+        coefficientLoss = torch.mean(coeff)
+        loss = reconstructionLoss + lossFactor*coefficientLoss
         loss.backward()
         opt.step()
         epochLoss += loss.item() * batch.shape[0]
+        epochReconstructionLoss += reconstructionLoss.item() * batch.shape[0]
+        epochCoefficientLoss += coefficientLoss.item() * batch.shape[0]
         epochSamples += batch.shape[0]
         opt.zero_grad()
     H.append(epochLoss / epochSamples)
+    reconstructionLossHistory.append(epochReconstructionLoss / epochSamples)
+    coefficientLossHistory.append(epochCoefficientLoss / epochSamples)
     if verbose == 2:
         print(f'{epoch + 1}/{epochs} - loss: {H[-1]:.6f}')
 
 # Examples for plotting the model outputs and learnings
+epochsAxis = np.arange(1, epochs + 1)
+plt.figure(2)
+plt.plot(epochsAxis, reconstructionLossHistory, label='Reconstruction loss')
+plt.plot(epochsAxis, coefficientLossHistory, label='Coefficient loss')
+plt.plot(epochsAxis, H, label='Total loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
 indPlot = 0
 model.eval()
 signalInput = signalT[:,:lTrain]
