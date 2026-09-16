@@ -89,18 +89,18 @@ kernelInit = np.array([-0.010597401785069032, 0.0328830116668852, 0.030841381835
 epochs = 1000
 verbose = 2
 
-# generates two models: 
-#      model1 outputs the reconstructed signals and the loss on the wavelet coefficients
-#      model2 outputs the reconstructed signals and wavelet coefficients
-model1,model2 = despawn.createDeSpaWN(inputSize=None, kernelInit=kernelInit, kernTrainable=kernTrainable, level=level, lossCoeff=lossCoeff, kernelsConstraint=mode, initHT=initHT, trainHT=trainHT)
-opt = torch.optim.NAdam(model1.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-07)
-# For the training we only use model1. The coefficient loss has no target.
-model1.train()
+model = despawn.DeSpaWN(kernelInit=kernelInit, kernTrainable=kernTrainable,
+                        level=level, lossCoeff=lossCoeff,
+                        kernelsConstraint=mode, initHT=initHT,
+                        trainHT=trainHT)
+opt = torch.optim.NAdam(model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-07)
+model.train()
 H = []
 for epoch in range(epochs):
     opt.zero_grad()
-    out, coeff = model1(signal)
-    loss = torch.mean(torch.abs(signal-out)) + lossFactor*torch.mean(coeff)
+    outputs = model(signal)
+    reconstruction, coeff = outputs[:2]
+    loss = torch.mean(torch.abs(signal-reconstruction)) + lossFactor*torch.mean(coeff)
     loss.backward()
     opt.step()
     H.append(loss.item())
@@ -109,19 +109,16 @@ for epoch in range(epochs):
 
 # Examples for plotting the model outputs and learnings
 indPlot = 0
-model1.eval()
-model2.eval()
+model.eval()
 with torch.no_grad():
-    out = model1(signal)
-    outC = model2(signal)
-out = tuple(value.detach().cpu().numpy() for value in out)
-outC = tuple(value.detach().cpu().numpy() for value in outC)
+    outputs = model(signal)
+out = tuple(value.detach().cpu().numpy() for value in outputs[:2])
+outC = tuple(value.detach().cpu().numpy() for value in (outputs[0], outputs[2], *outputs[3:]))
 # Test part of the signal
 with torch.no_grad():
-    outTe = model1(signalT[:,lTrain:,:,:])
-    outCTe = model2(signalT[:,lTrain:,:,:])
-outTe = tuple(value.detach().cpu().numpy() for value in outTe)
-outCTe = tuple(value.detach().cpu().numpy() for value in outCTe)
+    outputsTe = model(signalT[:,lTrain:,:,:])
+outTe = tuple(value.detach().cpu().numpy() for value in outputsTe[:2])
+outCTe = tuple(value.detach().cpu().numpy() for value in (outputsTe[0], outputsTe[2], *outputsTe[3:]))
 
 fig = plt.figure(1)
 fig.clf()

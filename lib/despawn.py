@@ -6,7 +6,7 @@ from torch import nn
 from lib import despawnLayers as impLay
 
 
-class _DeSpaWNCore(nn.Module):
+class DeSpaWN(nn.Module):
     def __init__(self, kernelInit, kernTrainable, level, lossCoeff,
                  kernelsConstraint, initHT, trainHT):
         super().__init__()
@@ -78,31 +78,4 @@ class _DeSpaWNCore(nn.Module):
         else:
             raise ValueError("Could not understand value in 'lossCoeff'. It should be either 'l1' or 'None'")
 
-        return g, coeffLoss, gint, highPass[::-1]
-
-
-class _DeSpaWNOutput(nn.Module):
-    def __init__(self, core, includeCoefficients):
-        super().__init__()
-        self.core = core
-        self.includeCoefficients = includeCoefficients
-
-    def forward(self, inputSig):
-        reconstruction, coeffLoss, gint, highPass = self.core(inputSig)
-        if self.includeCoefficients:
-            return reconstruction, gint, *highPass
-        return reconstruction, coeffLoss
-
-
-def createDeSpaWN(inputSize=None, kernelInit=8, kernTrainable=True, level=1,
-                  lossCoeff='l1', kernelsConstraint='QMF', initHT=1.0,
-                  trainHT=True):
-    """Create two PyTorch models sharing the same DeSpaWN parameters.
-
-    The first model returns reconstruction and coefficient loss. The second
-    returns reconstruction followed by the low-pass and high-pass outputs.
-    """
-    del inputSize
-    core = _DeSpaWNCore(kernelInit, kernTrainable, level, lossCoeff,
-                        kernelsConstraint, initHT, trainHT)
-    return _DeSpaWNOutput(core, False), _DeSpaWNOutput(core, True)
+        return g, coeffLoss, gint, *highPass[::-1]
