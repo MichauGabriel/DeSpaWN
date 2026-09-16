@@ -48,9 +48,7 @@ SOFTWARE.
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-import tensorflow as tf # designed with 2.1.0 /!\ models output changes with tf>2.2.0
-import tensorflow.keras as keras
+import torch
 
 from lib import despawn
 
@@ -58,7 +56,9 @@ from lib import despawn
 # Load a toy time series data to run DeSPAWN
 signal = pd.read_csv("monthly-sunspots.csv")
 lTrain = 2000 # length of the training section
-signalT = ((signal['Sunspots']-signal['Sunspots'].mean())/signal['Sunspots'].std()).values[np.newaxis,:,np.newaxis,np.newaxis]
+signalT = ((signal['Sunspots']-signal['Sunspots'].mean())/signal['Sunspots'].std()).values.copy()[np.newaxis,:,np.newaxis,np.newaxis]
+signal = signalT[:,:lTrain,:,:]
+signalT = torch.from_numpy(signalT).float()
 signal = signalT[:,:lTrain,:,:]
 
 # Number of decomposition level is max log2 of input TS
@@ -89,31 +89,39 @@ kernelInit = np.array([-0.010597401785069032, 0.0328830116668852, 0.030841381835
 epochs = 1000
 verbose = 2
 
-# Set sparsity (dummy) loss:
-def coeffLoss(yTrue,yPred):
-    return lossFactor*tf.reduce_mean(yPred,keepdims=True)
-# Set residual loss:
-def recLoss(yTrue,yPred):
-    return tf.math.abs(yTrue-yPred)
-
-keras.backend.clear_session()
 # generates two models: 
 #      model1 outputs the reconstructed signals and the loss on the wavelet coefficients
 #      model2 outputs the reconstructed signals and wavelet coefficients
 model1,model2 = despawn.createDeSpaWN(inputSize=None, kernelInit=kernelInit, kernTrainable=kernTrainable, level=level, lossCoeff=lossCoeff, kernelsConstraint=mode, initHT=initHT, trainHT=trainHT)
-opt = keras.optimizers.Nadam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, epsilon=1e-07, name="Nadam")
-# For the training we only use model1
-model1.compile(optimizer=opt, loss=[recLoss, coeffLoss])
-# the sparsity term has no ground truth => just input an empty numpy array as ground truth (anything would do, in coeffLoss, yTrue is not called)
-H = model1.fit(signal,[signal,np.empty((signal.shape[0]))], epochs=epochs, verbose=verbose)
+opt = torch.optim.NAdam(model1.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-07)
+# For the training we only use model1. The coefficient loss has no target.
+model1.train()
+H = []
+for epoch in range(epochs):
+    opt.zero_grad()
+    out, coeff = model1(signal)
+    loss = torch.mean(torch.abs(signal-out)) + lossFactor*torch.mean(coeff)
+    loss.backward()
+    opt.step()
+    H.append(loss.item())
+    if verbose == 2:
+        print(f'{epoch + 1}/{epochs} - loss: {H[-1]:.6f}')
 
 # Examples for plotting the model outputs and learnings
 indPlot = 0
-out  = model1.predict(signal)
-outC = model2.predict(signal)
+model1.eval()
+model2.eval()
+with torch.no_grad():
+    out = model1(signal)
+    outC = model2(signal)
+out = tuple(value.detach().cpu().numpy() for value in out)
+outC = tuple(value.detach().cpu().numpy() for value in outC)
 # Test part of the signal
-outTe  = model1.predict(signalT[:,lTrain:,:,:])
-outCTe = model2.predict(signalT[:,lTrain:,:,:])
+with torch.no_grad():
+    outTe = model1(signalT[:,lTrain:,:,:])
+    outCTe = model2(signalT[:,lTrain:,:,:])
+outTe = tuple(value.detach().cpu().numpy() for value in outTe)
+outCTe = tuple(value.detach().cpu().numpy() for value in outCTe)
 
 fig = plt.figure(1)
 fig.clf()
