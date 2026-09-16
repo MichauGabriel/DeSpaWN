@@ -54,6 +54,10 @@ from torch.utils.data import DataLoader, TensorDataset
 from lib import despawn
 
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using device: {device}')
+
+
 # Load a toy time series data to run DeSPAWN
 signal = pd.read_csv("monthly-sunspots.csv")
 lTrain = 2000 # length of the training section
@@ -74,7 +78,7 @@ if windowSize > signal.shape[1]:
 trainingWindows = signal.unfold(1, windowSize, windowSize)
 trainingWindows = trainingWindows.contiguous().reshape(-1, windowSize, 1, 1)
 trainLoader = DataLoader(TensorDataset(trainingWindows), batch_size=batchSize,
-                         shuffle=True)
+                         shuffle=True, pin_memory=device.type == 'cuda')
 
 # Number of decomposition levels is based on the training window size.
 level = 10
@@ -107,7 +111,7 @@ verbose = 2
 model = despawn.DeSpaWN(kernelInit=kernelInit, kernTrainable=kernTrainable,
                         level=level, lossCoeff=lossCoeff,
                         kernelsConstraint=mode, initHT=initHT,
-                        trainHT=trainHT)
+                        trainHT=trainHT).to(device)
 opt = torch.optim.NAdam(model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-07)
 model.train()
 H = []
@@ -116,6 +120,7 @@ for epoch in range(epochs):
     epochLoss = 0.0
     epochSamples = 0
     for (batch,) in trainLoader:
+        batch = batch.to(device, non_blocking=True)
         outputs = model(batch)
         reconstruction, coeff = outputs[:2]
         loss = torch.mean(torch.abs(batch-reconstruction)) + lossFactor*torch.mean(coeff)
@@ -135,12 +140,12 @@ signalInput = signalT[:,:lTrain]
 signalTest = signalT[:,lTrain:]
 #signalTestInput = signalTest.unsqueeze(-1).unsqueeze(-1)
 with torch.no_grad():
-    outputs = model(signalInput.unsqueeze(-1).unsqueeze(-1))
+    outputs = model(signalInput.unsqueeze(-1).unsqueeze(-1).to(device))
 out = tuple(value.detach().cpu().numpy() for value in outputs[:2])
 outC = tuple(value.detach().cpu().numpy() for value in (outputs[0], outputs[2], *outputs[3:]))
 # Test part of the signal
 with torch.no_grad():
-    outputsTe = model(signalTest.unsqueeze(-1).unsqueeze(-1))
+    outputsTe = model(signalTest.unsqueeze(-1).unsqueeze(-1).to(device))
 outTe = tuple(value.detach().cpu().numpy() for value in outputsTe[:2])
 outCTe = tuple(value.detach().cpu().numpy() for value in (outputsTe[0], outputsTe[2], *outputsTe[3:]))
 
