@@ -49,6 +49,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 from lib import despawn
 
@@ -56,13 +57,27 @@ from lib import despawn
 # Load a toy time series data to run DeSPAWN
 signal = pd.read_csv("monthly-sunspots.csv")
 lTrain = 2000 # length of the training section
-signalT = ((signal['Sunspots']-signal['Sunspots'].mean())/signal['Sunspots'].std()).values.copy()[np.newaxis,:,np.newaxis,np.newaxis]
-signal = signalT[:,:lTrain,:,:]
+signalT = ((signal['Sunspots']-signal['Sunspots'].mean())/signal['Sunspots'].std()).values.copy()[np.newaxis,:]
 signalT = torch.from_numpy(signalT).float()
-signal = signalT[:,:lTrain,:,:]
+signal = signalT[:,:lTrain]
+signal = torch.cat([signal,signal],dim=0)
+# Train on fixed-size windows. Windows never cross the boundary between
+# independent time series; samples left over at the end of each series are
+# kept for full-length evaluation but are not used for training.
+windowSize = 2000
+batchSize = 1
+signal = torch.as_tensor(signal, dtype=torch.float32)
+if signal.ndim != 2:
+    raise ValueError('signal must have shape (number_of_measurements, time_series_length)')
+if windowSize > signal.shape[1]:
+    raise ValueError('windowSize must not exceed the training time-series length')
+trainingWindows = signal.unfold(1, windowSize, windowSize)
+trainingWindows = trainingWindows.contiguous().reshape(-1, windowSize, 1, 1)
+trainLoader = DataLoader(TensorDataset(trainingWindows), batch_size=batchSize,
+                         shuffle=True)
 
-# Number of decomposition level is max log2 of input TS
-level = np.floor(np.log2(signal.shape[1])).astype(int)
+# Number of decomposition levels is based on the training window size.
+level = 10
 # Train hard thresholding (HT) coefficient?
 trainHT = True
 # Initialise HT value
@@ -86,7 +101,7 @@ kernelInit = np.array([-0.010597401785069032, 0.0328830116668852, 0.030841381835
                            -0.027983769416859854, 0.6308807679298589, 0.7148465705529157, 0.2303778133088965])
 
 
-epochs = 1000
+epochs = 460
 verbose = 2
 
 model = despawn.DeSpaWN(kernelInit=kernelInit, kernTrainable=kernTrainable,
@@ -98,34 +113,43 @@ model.train()
 H = []
 for epoch in range(epochs):
     opt.zero_grad()
-    outputs = model(signal)
-    reconstruction, coeff = outputs[:2]
-    loss = torch.mean(torch.abs(signal-reconstruction)) + lossFactor*torch.mean(coeff)
-    loss.backward()
-    opt.step()
-    H.append(loss.item())
+    epochLoss = 0.0
+    epochSamples = 0
+    for (batch,) in trainLoader:
+        outputs = model(batch)
+        reconstruction, coeff = outputs[:2]
+        loss = torch.mean(torch.abs(batch-reconstruction)) + lossFactor*torch.mean(coeff)
+        loss.backward()
+        opt.step()
+        epochLoss += loss.item() * batch.shape[0]
+        epochSamples += batch.shape[0]
+        opt.zero_grad()
+    H.append(epochLoss / epochSamples)
     if verbose == 2:
         print(f'{epoch + 1}/{epochs} - loss: {H[-1]:.6f}')
 
 # Examples for plotting the model outputs and learnings
 indPlot = 0
 model.eval()
+signalInput = signalT[:,:lTrain]
+signalTest = signalT[:,lTrain:]
+#signalTestInput = signalTest.unsqueeze(-1).unsqueeze(-1)
 with torch.no_grad():
-    outputs = model(signal)
+    outputs = model(signalInput.unsqueeze(-1).unsqueeze(-1))
 out = tuple(value.detach().cpu().numpy() for value in outputs[:2])
 outC = tuple(value.detach().cpu().numpy() for value in (outputs[0], outputs[2], *outputs[3:]))
 # Test part of the signal
 with torch.no_grad():
-    outputsTe = model(signalT[:,lTrain:,:,:])
+    outputsTe = model(signalTest.unsqueeze(-1).unsqueeze(-1))
 outTe = tuple(value.detach().cpu().numpy() for value in outputsTe[:2])
 outCTe = tuple(value.detach().cpu().numpy() for value in (outputsTe[0], outputsTe[2], *outputsTe[3:]))
 
 fig = plt.figure(1)
 fig.clf()
 ax = fig.add_subplot(2,1,1)
-ax.plot(np.arange(signal.shape[1]),signal[indPlot,:,0,0])
+ax.plot(np.arange(signal.shape[1]),signal[indPlot])
 ax.plot(np.arange(signal.shape[1]),out[0][indPlot,:,0,0])
-ax.plot(np.arange(signal.shape[1],signalT.shape[1]),signalT[indPlot,lTrain:,0,0])
+ax.plot(np.arange(signal.shape[1],signalT.shape[1]),signalTest[indPlot])
 ax.plot(np.arange(signal.shape[1],signalT.shape[1]),outTe[0][indPlot,:,0,0])
 ax.legend(['Train Original','Train Reconstructed','Test Original', 'Test Reconstructed'])
 ax = fig.add_subplot(2,2,3)
