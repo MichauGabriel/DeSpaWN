@@ -48,21 +48,40 @@ SOFTWARE.
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-import tensorflow as tf # designed with 2.1.0 /!\ models output changes with tf>2.2.0
-import tensorflow.keras as keras
+import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 from lib import despawn
+
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using device: {device}')
 
 
 # Load a toy time series data to run DeSPAWN
 signal = pd.read_csv("monthly-sunspots.csv")
 lTrain = 2000 # length of the training section
-signalT = ((signal['Sunspots']-signal['Sunspots'].mean())/signal['Sunspots'].std()).values[np.newaxis,:,np.newaxis,np.newaxis]
-signal = signalT[:,:lTrain,:,:]
+signalT = ((signal['Sunspots']-signal['Sunspots'].mean())/signal['Sunspots'].std()).values.copy()[np.newaxis,:]
+signalT = torch.from_numpy(signalT).float()
+signal = signalT[:,:lTrain]
+signal = torch.cat([signal,signal],dim=0)
+# Train on fixed-size windows. Windows never cross the boundary between
+# independent time series; samples left over at the end of each series are
+# kept for full-length evaluation but are not used for training.
+windowSize = 2000
+batchSize = 1
+signal = torch.as_tensor(signal, dtype=torch.float32)
+if signal.ndim != 2:
+    raise ValueError('signal must have shape (number_of_measurements, time_series_length)')
+if windowSize > signal.shape[1]:
+    raise ValueError('windowSize must not exceed the training time-series length')
+trainingWindows = signal.unfold(1, windowSize, windowSize)
+trainingWindows = trainingWindows.contiguous().reshape(-1, windowSize, 1, 1)
+trainLoader = DataLoader(TensorDataset(trainingWindows), batch_size=batchSize,
+                         shuffle=True, pin_memory=device.type == 'cuda')
 
-# Number of decomposition level is max log2 of input TS
-level = np.floor(np.log2(signal.shape[1])).astype(int)
+# Number of decomposition levels is based on the training window size.
+level = 10
 # Train hard thresholding (HT) coefficient?
 trainHT = True
 # Initialise HT value
@@ -86,41 +105,106 @@ kernelInit = np.array([-0.010597401785069032, 0.0328830116668852, 0.030841381835
                            -0.027983769416859854, 0.6308807679298589, 0.7148465705529157, 0.2303778133088965])
 
 
-epochs = 1000
+epochs = 460
 verbose = 2
+checkpointPath = 'despawn_checkpoint.pt'
 
-# Set sparsity (dummy) loss:
-def coeffLoss(yTrue,yPred):
-    return lossFactor*tf.reduce_mean(yPred,keepdims=True)
-# Set residual loss:
-def recLoss(yTrue,yPred):
-    return tf.math.abs(yTrue-yPred)
+model = despawn.DeSpaWN(kernelInit=kernelInit, kernTrainable=kernTrainable,
+                        level=level, lossCoeff=lossCoeff,
+                        kernelsConstraint=mode, initHT=initHT,
+                        trainHT=trainHT).to(device)
+opt = torch.optim.NAdam(model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-07)
+model.train()
+H = []
+reconstructionLossHistory = []
+coefficientLossHistory = []
+for epoch in range(epochs):
+    opt.zero_grad()
+    epochLoss = 0.0
+    epochReconstructionLoss = 0.0
+    epochCoefficientLoss = 0.0
+    epochSamples = 0
+    for (batch,) in trainLoader:
+        batch = batch.to(device, non_blocking=True)
+        outputs = model(batch)
+        reconstruction, coeff = outputs[:2]
+        reconstructionLoss = torch.mean(torch.abs(batch-reconstruction))
+        coefficientLoss = torch.mean(coeff)
+        loss = reconstructionLoss + lossFactor*coefficientLoss
+        loss.backward()
+        opt.step()
+        epochLoss += loss.item() * batch.shape[0]
+        epochReconstructionLoss += reconstructionLoss.item() * batch.shape[0]
+        epochCoefficientLoss += coefficientLoss.item() * batch.shape[0]
+        epochSamples += batch.shape[0]
+        opt.zero_grad()
+    H.append(epochLoss / epochSamples)
+    reconstructionLossHistory.append(epochReconstructionLoss / epochSamples)
+    coefficientLossHistory.append(epochCoefficientLoss / epochSamples)
+    if verbose == 2:
+        print(f'{epoch + 1}/{epochs} - loss: {H[-1]:.6f}')
 
-keras.backend.clear_session()
-# generates two models: 
-#      model1 outputs the reconstructed signals and the loss on the wavelet coefficients
-#      model2 outputs the reconstructed signals and wavelet coefficients
-model1,model2 = despawn.createDeSpaWN(inputSize=None, kernelInit=kernelInit, kernTrainable=kernTrainable, level=level, lossCoeff=lossCoeff, kernelsConstraint=mode, initHT=initHT, trainHT=trainHT)
-opt = keras.optimizers.Nadam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, epsilon=1e-07, name="Nadam")
-# For the training we only use model1
-model1.compile(optimizer=opt, loss=[recLoss, coeffLoss])
-# the sparsity term has no ground truth => just input an empty numpy array as ground truth (anything would do, in coeffLoss, yTrue is not called)
-H = model1.fit(signal,[signal,np.empty((signal.shape[0]))], epochs=epochs, verbose=verbose)
+# Save everything needed to reuse the trained model or resume training.
+torch.save({
+    'epoch': epochs,
+    'model_state_dict': model.state_dict(),
+    'optimizer_state_dict': opt.state_dict(),
+    'model_config': {
+        'kernelInit': kernelInit,
+        'kernTrainable': kernTrainable,
+        'level': level,
+        'lossCoeff': lossCoeff,
+        'kernelsConstraint': mode,
+        'initHT': initHT,
+        'trainHT': trainHT,
+    },
+    'lossHistory': H,
+    'reconstructionLossHistory': reconstructionLossHistory,
+    'coefficientLossHistory': coefficientLossHistory,
+}, checkpointPath)
+print(f'Saved checkpoint to {checkpointPath}')
+
+# To load the checkpoint later, instantiate the model with the saved
+# configuration and then restore its model and optimizer state:
+# checkpoint = torch.load(checkpointPath, map_location=device)
+# model = despawn.DeSpaWN(**checkpoint['model_config']).to(device)
+# model.load_state_dict(checkpoint['model_state_dict'])
+# opt = torch.optim.NAdam(model.parameters(), lr=0.001,
+#                         betas=(0.9, 0.999), eps=1e-07)
+# opt.load_state_dict(checkpoint['optimizer_state_dict'])
+# startEpoch = checkpoint['epoch']
 
 # Examples for plotting the model outputs and learnings
+epochsAxis = np.arange(1, epochs + 1)
+plt.figure(2)
+plt.plot(epochsAxis, reconstructionLossHistory, label='Reconstruction loss')
+plt.plot(epochsAxis, coefficientLossHistory, label='Coefficient loss')
+plt.plot(epochsAxis, H, label='Total loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
 indPlot = 0
-out  = model1.predict(signal)
-outC = model2.predict(signal)
+model.eval()
+signalInput = signalT[:,:lTrain]
+signalTest = signalT[:,lTrain:]
+#signalTestInput = signalTest.unsqueeze(-1).unsqueeze(-1)
+with torch.no_grad():
+    outputs = model(signalInput.unsqueeze(-1).unsqueeze(-1).to(device))
+out = tuple(value.detach().cpu().numpy() for value in outputs[:2])
+outC = tuple(value.detach().cpu().numpy() for value in (outputs[0], outputs[2], *outputs[3:]))
 # Test part of the signal
-outTe  = model1.predict(signalT[:,lTrain:,:,:])
-outCTe = model2.predict(signalT[:,lTrain:,:,:])
+with torch.no_grad():
+    outputsTe = model(signalTest.unsqueeze(-1).unsqueeze(-1).to(device))
+outTe = tuple(value.detach().cpu().numpy() for value in outputsTe[:2])
+outCTe = tuple(value.detach().cpu().numpy() for value in (outputsTe[0], outputsTe[2], *outputsTe[3:]))
 
 fig = plt.figure(1)
 fig.clf()
 ax = fig.add_subplot(2,1,1)
-ax.plot(np.arange(signal.shape[1]),signal[indPlot,:,0,0])
+ax.plot(np.arange(signal.shape[1]),signal[indPlot])
 ax.plot(np.arange(signal.shape[1]),out[0][indPlot,:,0,0])
-ax.plot(np.arange(signal.shape[1],signalT.shape[1]),signalT[indPlot,lTrain:,0,0])
+ax.plot(np.arange(signal.shape[1],signalT.shape[1]),signalTest[indPlot])
 ax.plot(np.arange(signal.shape[1],signalT.shape[1]),outTe[0][indPlot,:,0,0])
 ax.legend(['Train Original','Train Reconstructed','Test Original', 'Test Reconstructed'])
 ax = fig.add_subplot(2,2,3)

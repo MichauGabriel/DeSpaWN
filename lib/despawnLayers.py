@@ -45,109 +45,117 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 """
-import tensorflow as tf
+import torch
+from torch import nn
+from torch.nn import functional as F
 
-class Kernel(tf.keras.layers.Layer):
+
+class Kernel(nn.Module):
+    """Trainable one-dimensional wavelet kernel stored for 2D convolutions."""
+
     def __init__(self, kernelInit=8, trainKern=True, **kwargs):
-        self.trainKern  = trainKern
-        if isinstance(kernelInit,int):
-            self.kernelSize = kernelInit
-            self.kernelInit = 'random_normal'
+        """Initialize a kernel from a length or an array of coefficients.
+
+        Args:
+            kernelInit: Integer kernel length for random initialization, or
+                an array-like collection of initial coefficients.
+            trainKern: Whether the kernel is trainable.
+        """
+        super().__init__()
+        if isinstance(kernelInit, int):
+            kernel = torch.randn(kernelInit, 1, 1, 1)
         else:
-            self.kernelSize = kernelInit.__len__()
-            self.kernelInit = tf.constant_initializer(kernelInit)
-        super(Kernel, self).__init__(**kwargs)
-    def build(self, input_shape):
-        self.kernel = self.add_weight(shape       = (self.kernelSize,1,1,1),
-                                      initializer = self.kernelInit,
-                                      trainable   = self.trainKern, name='kernel')
-        super(Kernel, self).build(input_shape)
-    def call(self, inputs):
+            kernel = torch.as_tensor(kernelInit, dtype=torch.float32).reshape(-1, 1, 1, 1)
+        self.kernel = nn.Parameter(kernel, requires_grad=trainKern)
+
+    def forward(self, inputs=None):
+        """Return the kernel coefficients."""
         return self.kernel
 
-class LowPassWave(tf.keras.layers.Layer):
-    """
-    Layer that performs a convolution between its two inputs with stride (2,1)
-    """
-    def __init__(self, **kwargs):
-        super(LowPassWave, self).__init__(**kwargs)
 
-    def build(self, input_shape):
-        super(LowPassWave, self).build(input_shape)
+def _to_channels_first(signal):
+    """Convert ``(batch, time, height, channels)`` to PyTorch layout."""
+    return signal.permute(0, 3, 1, 2)
 
-    def call(self, inputs):
-        return tf.nn.conv2d(inputs[0], inputs[1], padding="SAME", strides=(2, 1))
 
-class HighPassWave(tf.keras.layers.Layer):
-    """
-    Layer that performs a convolution between its two inputs with stride (2,1).
-    Performs first the reverse alternative flip on the second inputs
-    """
-    def __init__(self, **kwargs):
-        super(HighPassWave, self).__init__(**kwargs)
+def _to_channels_last(signal):
+    """Convert PyTorch layout back to ``(batch, time, height, channels)``."""
+    return signal.permute(0, 2, 3, 1)
 
-    def build(self, input_shape):
-        self.qmfFlip = tf.reshape(tf.Variable([(-1)**(i) for i in range(input_shape[1][0])],
-                                              dtype='float32', name='mask', trainable=False),(-1,1,1,1))
-        super(HighPassWave, self).build(input_shape)
 
-    def call(self, inputs):
-        # print(self.qmfFlip)
-        return tf.nn.conv2d(inputs[0], tf.math.multiply(tf.reverse(inputs[1],[0]),self.qmfFlip),
-                            padding="SAME", strides=(2, 1))
+def _same_padding(length, kernelSize, stride=2):
+    """Return asymmetric padding that gives ceil(length / stride) output."""
+    outputLength = (length + stride - 1) // stride
+    padding = max((outputLength - 1) * stride + kernelSize - length, 0)
+    return padding // 2, padding - padding // 2
 
-class LowPassTrans(tf.keras.layers.Layer):
-    """
-    Layer that performs a convolution transpose between its two inputs with stride (2,1).
-    The third input specifies the size of the reconstructed signal (to make sure it matches the decomposed one)
-    """
-    def __init__(self, **kwargs):
-        super(LowPassTrans, self).__init__(**kwargs)
 
-    def build(self, input_shape):
-        super(LowPassTrans, self).build(input_shape)
+class LowPassWave(nn.Module):
+    """Apply a stride-two low-pass analysis filter."""
 
-    def call(self, inputs):
-        return tf.nn.conv2d_transpose(inputs[0], inputs[1], inputs[2], padding="SAME", strides=(2, 1))
+    def forward(self, inputs):
+        """Filter and downsample a signal along its time dimension."""
+        signal, kernel = inputs
+        signal = _to_channels_first(signal)
+        kernel = kernel.permute(3, 2, 0, 1)
+        padBefore, padAfter = _same_padding(signal.shape[2], kernel.shape[2])
+        signal = F.pad(signal, (0, 0, padBefore, padAfter))
+        result = F.conv2d(signal, kernel, stride=(2, 1))
+        return _to_channels_last(result)
 
-class HighPassTrans(tf.keras.layers.Layer):
-    """
-    Layer that performs a convolution transpose between its two inputs with stride (2,1).
-    Performs first the reverse alternative flip on the second inputs
-    The third input specifies the size of the reconstructed signal (to make sure it matches the decomposed one)
-    """
-    def __init__(self, **kwargs):
-        super(HighPassTrans, self).__init__(**kwargs)
 
-    def build(self, input_shape):
-        self.qmfFlip     = tf.reshape(tf.Variable([(-1)**(i) for i in range(input_shape[1][0])],
-                                                  dtype='float32', name='mask', trainable=False),(-1,1,1,1))
-        super(HighPassTrans, self).build(input_shape)
+class HighPassWave(nn.Module):
+    """Apply the quadrature-mirror high-pass analysis filter."""
 
-    def call(self, inputs):
-        return tf.nn.conv2d_transpose(inputs[0], tf.math.multiply(tf.reverse(inputs[1],[0]),self.qmfFlip),
-                                      inputs[2], padding="SAME", strides=(2, 1))
+    def forward(self, inputs):
+        """Create the alternating high-pass filter and downsample."""
+        signal, kernel = inputs
+        mask = torch.pow(-1.0, torch.arange(kernel.shape[0], device=kernel.device, dtype=kernel.dtype))
+        kernel = torch.flip(kernel, dims=(0,)) * mask.reshape(-1, 1, 1, 1)
+        return LowPassWave()((signal, kernel))
 
-class HardThresholdAssym(tf.keras.layers.Layer):
-    """
-    Learnable Hard-thresholding layers
-    """
+
+class LowPassTrans(nn.Module):
+    """Apply a stride-two low-pass synthesis filter."""
+
+    def forward(self, inputs):
+        """Upsample and reconstruct a low-pass signal to its input length."""
+        signal, kernel, inputSize = inputs
+        signal = _to_channels_first(signal)
+        kernel = kernel.permute(3, 2, 0, 1)
+        raw = F.conv_transpose2d(signal, kernel, stride=(2, 1))
+        padBefore, padAfter = _same_padding(inputSize[1], kernel.shape[2])
+        raw = raw[:, :, padBefore:padBefore + inputSize[1], :]
+        return _to_channels_last(raw)
+
+
+class HighPassTrans(nn.Module):
+    """Apply the quadrature-mirror high-pass synthesis filter."""
+
+    def forward(self, inputs):
+        """Create the alternating high-pass filter and upsample."""
+        signal, kernel, inputSize = inputs
+        mask = torch.pow(-1.0, torch.arange(kernel.shape[0], device=kernel.device, dtype=kernel.dtype))
+        kernel = torch.flip(kernel, dims=(0,)) * mask.reshape(-1, 1, 1, 1)
+        return LowPassTrans()((signal, kernel, inputSize))
+
+
+class HardThresholdAssym(nn.Module):
+    """Differentiable asymmetric threshold for positive and negative values."""
+
     def __init__(self, init=None, trainBias=True, **kwargs):
-        if isinstance(init,float) or isinstance(init,int):
-            self.init = tf.constant_initializer(init)
-        else:
-            self.init = 'ones'
-        self.trainBias = trainBias
-        super(HardThresholdAssym, self).__init__(**kwargs)
+        """Initialize independent positive and negative thresholds.
 
-    def build(self, input_shape):
-        self.thrP = self.add_weight(shape     = (1,1,1,1), initializer=self.init,
-                                    trainable = self.trainBias,      name='threshold+')
-        self.thrN = self.add_weight(shape     = (1,1,1,1), initializer=self.init,
-                                    trainable = self.trainBias,      name='threshold-')
+        Args:
+            init: Initial value for both thresholds; defaults to ``1.0``.
+            trainBias: Whether the thresholds are trainable.
+        """
+        super().__init__()
+        value = 1.0 if init is None else float(init)
+        self.thrP = nn.Parameter(torch.full((1, 1, 1, 1), value), requires_grad=trainBias)
+        self.thrN = nn.Parameter(torch.full((1, 1, 1, 1), value), requires_grad=trainBias)
 
-        super(HardThresholdAssym, self).build(input_shape)
-
-    def call(self, inputs):
-        return tf.math.multiply(inputs,tf.math.sigmoid(10*(inputs-self.thrP))+\
-                                       tf.math.sigmoid(-10*(inputs+self.thrN)))
+    def forward(self, inputs):
+        """Suppress values near zero using smooth sigmoid gates."""
+        return inputs * (torch.sigmoid(10 * (inputs - self.thrP)) +
+                         torch.sigmoid(-10 * (inputs + self.thrN)))
